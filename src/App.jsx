@@ -5,6 +5,7 @@ import InstrumentTable from "./components/InstrumentTable";
 import DetailsPanel from "./components/DetailsPanel";
 import { API_BASE } from "./config";
 import IfcBrowserViewer from "./components/IfcBrowserViewer";
+import "./App.css";
 
 export default function App() {
   const [file, setFile] = useState(null);
@@ -16,10 +17,13 @@ export default function App() {
   const [pollIntervalMs, setPollIntervalMs] = useState(2000);
   const [error, setError] = useState(null);
   const [isPolling, setIsPolling] = useState(false);
-  const canvasRef = useRef();
   const [uploadedFileUrl, setUploadedFileUrl] = useState(null);
   const [aiSummary, setAiSummary] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
+
+  const [chatHistory, setChatHistory] = useState([]); 
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
 
   async function requestAiSummary() {
     if (!report || !report.instruments) return;
@@ -49,24 +53,18 @@ export default function App() {
       if (uploadedFileUrl) {
         try {
           URL.revokeObjectURL(uploadedFileUrl);
-        } catch (e) {}
+        } catch {}
         setUploadedFileUrl(null);
       }
       return;
     }
-
-    if (!(file instanceof Blob) && !(file instanceof File)) {
-      console.warn("Selected `file` is not a Blob/File:", file);
-      return;
-    }
-
+    if (!(file instanceof Blob) && !(file instanceof File)) return;
     const url = URL.createObjectURL(file);
     setUploadedFileUrl(url);
-
     return () => {
       try {
         URL.revokeObjectURL(url);
-      } catch (e) {}
+      } catch {}
     };
   }, [file]);
 
@@ -76,7 +74,6 @@ export default function App() {
       setError("Please choose an IFC file first.");
       return;
     }
-
     setUploadPct(0);
     setJobId(null);
     setJobStatus("queued");
@@ -85,7 +82,6 @@ export default function App() {
 
     const form = new FormData();
     form.append("file", file, file.name);
-
     const xhr = new XMLHttpRequest();
     const endpoint = `${API_BASE.replace(/\/$/, "")}/analyze-model-async`;
 
@@ -108,7 +104,7 @@ export default function App() {
             (() => {
               try {
                 return JSON.parse(xhr.responseText);
-              } catch (e) {
+              } catch {
                 return null;
               }
             })();
@@ -118,9 +114,7 @@ export default function App() {
             setJobId(resp.job_id);
             setJobStatus(resp.status || "queued");
           } else {
-            setError(
-              "Invalid response from server (no job_id). See console for details."
-            );
+            setError("Invalid response from server (no job_id). See console.");
             console.warn(
               "Invalid server response:",
               xhr.response,
@@ -134,7 +128,7 @@ export default function App() {
               errDetail = JSON.stringify(xhr.response);
             else
               errDetail = xhr.responseText || `${xhr.status} ${xhr.statusText}`;
-          } catch (e) {
+          } catch {
             errDetail = `${xhr.status} ${xhr.statusText}`;
           }
           setError(`Upload failed: ${errDetail}`);
@@ -142,31 +136,23 @@ export default function App() {
         }
       };
 
-      xhr.onerror = (ev) => {
-        console.error("XHR network error", ev);
-        setError(
-          "Network error during upload. Check backend is running and CORS is configured."
-        );
+      xhr.onerror = () => {
+        setError("Network error during upload. Check backend and CORS.");
       };
 
       xhr.ontimeout = () => {
-        console.error("XHR timeout");
-        setError(
-          "Upload timed out. Try increasing xhr.timeout or use the async job endpoint."
-        );
+        setError("Upload timed out.");
       };
 
       xhr.onabort = () => {
-        console.warn("XHR aborted by client");
         setError("Upload aborted.");
       };
 
       xhr.send(form);
     } catch (err) {
-      console.error("startAnalysis throwable error:", err);
       setError("Upload failed: " + (err?.message || String(err)));
     }
-  }, [file, API_BASE]);
+  }, [file]);
 
   useEffect(() => {
     if (!jobId) return;
@@ -201,7 +187,6 @@ export default function App() {
     };
 
     poll();
-
     return () => {
       stopped = true;
       setIsPolling(false);
@@ -221,36 +206,158 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  async function sendChatQuestion(questionText) {
+    if (!questionText || !report) return;
+    setChatLoading(true);
+    setChatHistory((h) => [...h, { role: "user", text: questionText }]);
+    try {
+      const payload = {
+        report: report,
+        question: questionText,
+        history: chatHistory || [],
+      };
+      const res = await fetch(`${API_BASE}/ai/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const j = await res.json();
+      if (!j.ok) {
+        const errText = j.error || JSON.stringify(j);
+        setChatHistory((h) => [
+          ...h,
+          { role: "assistant", text: `Error: ${errText}` },
+        ]);
+      } else {
+        const assistantText = j.answer || (j.raw ? String(j.raw) : "No answer");
+        setChatHistory((h) => [
+          ...h,
+          { role: "assistant", text: assistantText },
+        ]);
+        if (Array.isArray(j.recommendations) && j.recommendations.length) {
+          setChatHistory((h) => [
+            ...h,
+            {
+              role: "assistant",
+              text: "Recommendations:\n" + j.recommendations.join("\n- "),
+            },
+          ]);
+        }
+      }
+    } catch (err) {
+      setChatHistory((h) => [
+        ...h,
+        { role: "assistant", text: `Network error: ${err.message}` },
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
+  }
+
+  const onSendClick = async () => {
+    if (!chatInput || chatInput.trim().length === 0) return;
+    const q = chatInput.trim();
+    setChatInput("");
+    await sendChatQuestion(q);
+  };
+
+  const askAboutSelected = async () => {
+    if (!selected) return;
+    const q = `Explain issues and fixes for ${selected.tag || selected.Tag}.`;
+    await sendChatQuestion(q);
+  };
+
+  const progressLabel = jobStatus
+    ? jobStatus
+    : uploadPct
+    ? `Upload ${uploadPct}%`
+    : "No analysis yet";
+
+    const chatWindowRef = useRef(null);
+
+    const handleEnterKey = (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        onSendClick();
+      }
+    };
+
+   useEffect(() => {
+     const el = chatWindowRef.current;
+     if (!el) return;
+
+     const raf = requestAnimationFrame(() => {
+       try {
+         el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+       } catch (e) {
+         el.scrollTop = el.scrollHeight;
+       }
+     });
+
+     return () => cancelAnimationFrame(raf);
+   }, [chatHistory, chatLoading]);
+
+
   return (
-    <div className="app">
-      <header className="topbar">
+    <div className="app-shell">
+      <header className="app-header">
         <div className="brand">
-          <h1>IFC Flow Instrument Inspector</h1>
-          <p className="tagline">Upload IFC → automated checks → JSON report</p>
+          <div className="brand-icon" aria-hidden>
+            <svg
+              width="36"
+              height="36"
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <rect
+                x="2"
+                y="5"
+                width="20"
+                height="14"
+                rx="3"
+                fill="currentColor"
+                opacity="0.12"
+              />
+              <path
+                d="M6 12h12"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+              <circle cx="9" cy="10" r="1.2" fill="currentColor" />
+              <circle cx="15" cy="14" r="1.2" fill="currentColor" />
+            </svg>
+          </div>
+
+          <div>
+            <h1 className="title">IFC Flow Instrument Inspector</h1>
+            <p className="subtitle">
+              Visualize • Validate • Improve — AI-assisted checks for piping
+              instruments
+            </p>
+          </div>
         </div>
 
-        <div className="actions">
-          <Dropzone
-            onDropAccepted={(accepted) => setFile(accepted[0])}
-            maxFiles={1}
-            accept={{ "application/octet-stream": [".ifc"] }}
-          >
-            {({ getRootProps, getInputProps, isDragActive }) => (
-              <div
-                {...getRootProps()}
-                className={`file-drop ${isDragActive ? "active" : ""}`}
-              >
-                <input {...getInputProps()} />
-                <div className="file-drop-text">
-                  {file
-                    ? file.name
-                    : "Drag & drop .ifc here or click to select"}
+        <div className="header-actions">
+          <div className="file-drop-cta">
+            <Dropzone
+              onDropAccepted={(accepted) => setFile(accepted[0])}
+              maxFiles={1}
+              accept={{ "application/octet-stream": [".ifc"] }}
+            >
+              {({ getRootProps, getInputProps, isDragActive }) => (
+                <div
+                  {...getRootProps()}
+                  className={`drop-area ${isDragActive ? "active" : ""}`}
+                >
+                  <input {...getInputProps()} />
+                  <span>
+                    {file ? file.name : "Drop .ifc or click to upload"}
+                  </span>
                 </div>
-              </div>
-            )}
-          </Dropzone>
-
-          <div className="controls-row">
+              )}
+            </Dropzone>
             <button
               className="btn primary"
               onClick={startAnalysis}
@@ -259,7 +366,7 @@ export default function App() {
               {isPolling ? "Analyzing..." : "Start Analysis"}
             </button>
             <button
-              className="btn outline"
+              className="btn ghost"
               onClick={downloadReport}
               disabled={!report}
             >
@@ -269,130 +376,150 @@ export default function App() {
         </div>
       </header>
 
-      <main className="grid">
-        <section className="left-card">
-          <div className="card-header">
-            <h3>3D Viewer</h3>
-            <div className="small-muted">
-              {jobStatus
-                ? `Job status: ${jobStatus}`
-                : uploadPct
-                ? `Upload ${uploadPct}%`
-                : "No analysis yet"}
+      <main className="app-main container">
+        <section className="left-column">
+          <div className="card viewer-card">
+            <div className="card-head">
+              <h3>3D Viewer</h3>
+              <div className="muted">{progressLabel}</div>
             </div>
-          </div>
 
-          <div className="viewer">
-            <IfcBrowserViewer
-              key={uploadedFileUrl || "no-ifc"}
-              fileUrl={uploadedFileUrl}
-            />
-          </div>
+            <div className="viewer">
+              <IfcBrowserViewer
+                key={uploadedFileUrl || "no-ifc"}
+                fileUrl={uploadedFileUrl}
+              />
+            </div>
 
-          <div className="card-footer">
-            <div>
-              <strong>Upload Progress:</strong>
-              <div className="progress-track">
-                <div
-                  className="progress-bar"
-                  style={{ width: `${uploadPct}%` }}
-                />
+            <div className="card-foot">
+              <div className="upload-meta">
+                <div className="progress-wrap" aria-hidden>
+                  <div className="progress-track">
+                    <div
+                      className="progress-bar"
+                      style={{ width: `${uploadPct}%` }}
+                    />
+                  </div>
+                  <small className="muted">{uploadPct}%</small>
+                </div>
+
+                <div className="poll-ctrl">
+                  <label>Poll interval</label>
+                  <input
+                    type="number"
+                    value={pollIntervalMs}
+                    onChange={(e) =>
+                      setPollIntervalMs(Number(e.target.value) || 2000)
+                    }
+                  />
+                </div>
               </div>
             </div>
+          </div>
 
-            <div>
-              <label>Poll interval (ms)</label>
-              <input
-                type="number"
-                value={pollIntervalMs}
-                onChange={(e) =>
-                  setPollIntervalMs(Number(e.target.value) || 2000)
-                }
+          <div className="card instruments-card">
+            <div className="card-head">
+              <h3>Instruments</h3>
+              <div className="muted">Click a row or marker to inspect</div>
+            </div>
+
+            <div className="table-area">
+              <InstrumentTable
+                instruments={report ? report.instruments : []}
+                onSelect={(ins) => setSelected(ins)}
               />
             </div>
           </div>
         </section>
 
-        <aside className="right-card">
-          <div className="card-header">
-            <h3>Instruments</h3>
-            <div className="small-muted">Click a marker or row to inspect</div>
+        <aside className="right-column">
+          <div className="card details-card">
+            <div className="card-head split">
+              <div>
+                <h3>Details</h3>
+                <div className="muted">Selected instrument details</div>
+              </div>
+              <div className="small-actions">
+                <button className="btn small" onClick={() => setSelected(null)}>
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div className="details-area">
+              <AnimatePresence>
+                <motion.div
+                  key={selected ? selected.tag || selected.Tag : "empty"}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 6 }}
+                >
+                  <DetailsPanel instrument={selected} />
+                </motion.div>
+              </AnimatePresence>
+            </div>
           </div>
 
-          <div className="table-wrapper">
-            <InstrumentTable
-              instruments={report ? report.instruments : []}
-              onSelect={(ins) => setSelected(ins)}
-            />
-          </div>
+          <div className="card ai-card">
+            <div className="card-head split">
+              <div>
+                <h3>AI Summary</h3>
+                <div className="muted">
+                  Quick automated review and recommendations
+                </div>
+              </div>
+              <div>
+                <button
+                  className="btn small ghost"
+                  onClick={requestAiSummary}
+                  disabled={!report || aiLoading}
+                >
+                  {aiLoading ? "Working..." : "Refresh"}
+                </button>
+              </div>
+            </div>
 
-          <div className="details-area">
-            <AnimatePresence>
-              <motion.div
-                key={selected ? selected.tag : "empty"}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 8 }}
-              >
-                <DetailsPanel instrument={selected} />
-              </motion.div>
-            </AnimatePresence>
-          </div>
-
-          <div style={{ marginTop: 12 }}>
-            <button
-              className="btn outline"
-              onClick={requestAiSummary}
-              disabled={!report || aiLoading}
-            >
-              {aiLoading ? "Analyzing…" : "AI Summary"}
-            </button>
-
-            {aiSummary && (
-              <div
-                className="ai-summary card"
-                style={{ marginTop: 10, padding: 10 }}
-              >
-                {aiSummary.error ? (
-                  <pre>{aiSummary.error}</pre>
+            <div className="ai-body">
+              {aiLoading ? (
+                <div className="summary-skeleton">
+                  <div className="skeleton-row big"></div>
+                  <div className="skeleton-row"></div>
+                  <div className="skeleton-grid">
+                    <div className="skeleton-box"></div>
+                    <div className="skeleton-box"></div>
+                    <div className="skeleton-box"></div>
+                  </div>
+                  <div className="skeleton-row"></div>
+                  <div className="skeleton-row short"></div>
+                </div>
+              ) : aiSummary ? (
+                aiSummary.error ? (
+                  <pre className="ai-error">{aiSummary.error}</pre>
                 ) : (
-                  <>
-                    <div>
-                      <strong>Total instruments:</strong>{" "}
-                      {aiSummary.total_instruments}
-                    </div>
-                    <div>
-                      <strong>By type:</strong>
-                      <ul>
-                        {(aiSummary.by_type || []).map((t, i) => (
-                          <li key={i}>
-                            {t.type}: {t.count}
-                          </li>
-                        ))}
-                      </ul>
+                  <div className="summary-grid">
+                    <div className="summary-item">
+                      <div className="summary-num">
+                        {aiSummary.total_instruments}
+                      </div>
+                      <div className="summary-label">Total</div>
                     </div>
 
-                    <div>
-                      <strong>Failures:</strong>
-                      {(aiSummary.failures || []).length === 0 ? (
-                        <div>None detected</div>
-                      ) : (
-                        <ul>
-                          {(aiSummary.failures || []).map((f, idx) => (
-                            <li key={idx}>
-                              <strong>{f.tag}</strong> ({f.type}) — issues:{" "}
-                              {f.issues.join(", ")}
-                              <div style={{ fontSize: 12, color: "#666" }}>
-                                {JSON.stringify(f.details)}
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
+                    <div className="summary-item">
+                      <div className="summary-num">
+                        {(aiSummary.by_type || []).length}
+                      </div>
+                      <div className="summary-label">Types</div>
                     </div>
 
-                    <div>
-                      <strong>Recommendations:</strong>
+                    <div className="summary-item">
+                      <div className="summary-num">
+                        {(aiSummary.failures || []).length}
+                      </div>
+                      <div className="summary-label">Failures</div>
+                    </div>
+
+                    <div className="summary-recs">
+                      <strong>Recommendations</strong>
                       <ol>
                         {(aiSummary.summary_recommendations || []).map(
                           (r, i) => (
@@ -401,18 +528,114 @@ export default function App() {
                         )}
                       </ol>
                     </div>
+                  </div>
+                )
+              ) : (
+                <div className="ai-empty">
+                  No summary yet — run analysis and click Refresh.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="card chat-card">
+            <div className="card-head split">
+              <div>
+                <h3>AI Chat</h3>
+                <div className="muted">
+                  Ask follow-ups, request fixes, or deep-dive
+                </div>
+              </div>
+              <div className="small-actions">
+                <button
+                  className="btn small"
+                  onClick={() => {
+                    setChatHistory([]);
+                    setChatInput("");
+                  }}
+                >
+                  Clear
+                </button>
+                <button
+                  className="btn small ghost"
+                  onClick={askAboutSelected}
+                  disabled={!selected}
+                >
+                  Ask selected
+                </button>
+              </div>
+            </div>
+
+            <div className="chat-body">
+              <div className="chat-window" role="log" ref={chatWindowRef}>
+                {chatHistory.length === 0 ? (
+                  <div className="chat-empty muted">
+                    No messages yet. Ask something about the model.
+                  </div>
+                ) : (
+                  <>
+                    {chatHistory.map((m, i) => (
+                      <div
+                        key={i}
+                        className={`chat-bubble ${
+                          m.role === "user" ? "user" : "assistant"
+                        }`}
+                      >
+                        <div
+                          className="bubble-text"
+                          style={{ whiteSpace: "pre-wrap" }}
+                        >
+                          {m.text}
+                        </div>
+                      </div>
+                    ))}
+
+                    {chatLoading && (
+                      <div className="chat-bubble assistant thinking-bubble">
+                        <div className="typing">
+                          <span></span>
+                          <span></span>
+                          <span></span>
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
-            )}
+
+              <div className="chat-input-row">
+                <input
+                  placeholder={
+                    report
+                      ? "Example: Which instruments need immediate attention?"
+                      : "Run an analysis first"
+                  }
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  disabled={!report || chatLoading}
+                  onKeyDown={handleEnterKey}
+                />
+
+                <button
+                  className="btn primary"
+                  onClick={onSendClick}
+                  disabled={!report || chatLoading || !chatInput}
+                >
+                  {chatLoading ? "Thinking..." : "Send"}
+                </button>
+              </div>
+            </div>
           </div>
 
-          {error && <div className="error">{error}</div>}
+          {error && <div className="error-strip">{error}</div>}
         </aside>
       </main>
 
-      <footer className="footer">
-        <div>Built with React • Upload size limits depend on your backend.</div>
+      <footer className="app-footer">
+        <div>IFC Viewer</div>
+        <div className="footer-right">
+          <small>v1.0</small>
+        </div>
       </footer>
     </div>
   );
