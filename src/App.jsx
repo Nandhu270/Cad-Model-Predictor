@@ -6,7 +6,6 @@ import DetailsPanel from "./components/DetailsPanel";
 import { API_BASE } from "./config";
 import IfcBrowserViewer from "./components/IfcBrowserViewer";
 
-
 export default function App() {
   const [file, setFile] = useState(null);
   const [uploadPct, setUploadPct] = useState(0);
@@ -18,12 +17,34 @@ export default function App() {
   const [error, setError] = useState(null);
   const [isPolling, setIsPolling] = useState(false);
   const canvasRef = useRef();
-  // inside component state:
   const [uploadedFileUrl, setUploadedFileUrl] = useState(null);
+  const [aiSummary, setAiSummary] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
 
-  // create/revoke object URL only when `file` changes
+  async function requestAiSummary() {
+    if (!report || !report.instruments) return;
+    setAiLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/ai/summarize-instruments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruments: report.instruments }),
+      });
+      const j = await res.json();
+      if (!j.ok) {
+        console.error("AI summary failed", j);
+        setAiSummary({ error: j.error, raw: j.raw || null });
+      } else {
+        setAiSummary(j.ai_result);
+      }
+    } catch (err) {
+      setAiSummary({ error: err.message });
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   useEffect(() => {
-    // if no file, clear any previous url
     if (!file) {
       if (uploadedFileUrl) {
         try {
@@ -34,23 +55,20 @@ export default function App() {
       return;
     }
 
-    // ensure `file` is a File/Blob before creating object URL
     if (!(file instanceof Blob) && !(file instanceof File)) {
       console.warn("Selected `file` is not a Blob/File:", file);
       return;
     }
 
     const url = URL.createObjectURL(file);
-    // console.log("[debug] created object URL →", url); // IMPORTANT
     setUploadedFileUrl(url);
 
     return () => {
-      // revoke the URL when file changes or component unmounts
       try {
         URL.revokeObjectURL(url);
       } catch (e) {}
     };
-  }, [file]); // runs only when `file` changes
+  }, [file]);
 
   const startAnalysis = useCallback(async () => {
     setError(null);
@@ -70,31 +88,24 @@ export default function App() {
 
     const xhr = new XMLHttpRequest();
     const endpoint = `${API_BASE.replace(/\/$/, "")}/analyze-model-async`;
-    // console.log("Uploading file to:", endpoint, "file:", file.name, file.size);
 
     try {
       xhr.open("POST", endpoint, true);
-      // ask browser to parse JSON response for us
       xhr.responseType = "json";
-      // optional timeout (ms). Increase if your analysis is slow to start.
-      xhr.timeout = 120000; // 2 minutes
+      xhr.timeout = 120000;
 
       xhr.upload.onprogress = (ev) => {
         if (ev.lengthComputable) {
           const pct = Math.round((ev.loaded / ev.total) * 100);
           setUploadPct(pct);
-          // console.log("upload progress:", pct, "%");
         }
       };
 
       xhr.onload = () => {
-        // console.log("XHR load. status:", xhr.status, "response:", xhr.response);
-        // When responseType = 'json', xhr.response may be null if server returned non-json
         if (xhr.status >= 200 && xhr.status < 300) {
           const resp =
             xhr.response ??
             (() => {
-              // fallback: try parsing text
               try {
                 return JSON.parse(xhr.responseText);
               } catch (e) {
@@ -106,9 +117,7 @@ export default function App() {
             setUploadPct(100);
             setJobId(resp.job_id);
             setJobStatus(resp.status || "queued");
-            // console.log("Job created:", resp.job_id);
           } else {
-            // server returned 200 but no job id — show full body for debugging
             setError(
               "Invalid response from server (no job_id). See console for details."
             );
@@ -119,7 +128,6 @@ export default function App() {
             );
           }
         } else {
-          // non-2xx: try to show server-provided error message (json or text)
           let errDetail = "";
           try {
             if (xhr.response && typeof xhr.response === "object")
@@ -158,9 +166,8 @@ export default function App() {
       console.error("startAnalysis throwable error:", err);
       setError("Upload failed: " + (err?.message || String(err)));
     }
-  }, [file, API_BASE]); // include API_BASE so the hook updates if you change the backend URL
+  }, [file, API_BASE]);
 
-  // Poll job status until done/failed
   useEffect(() => {
     if (!jobId) return;
     let stopped = false;
@@ -185,7 +192,6 @@ export default function App() {
           setIsPolling(false);
           setJobId(null);
         } else {
-          // still running -> poll again
           if (!stopped) setTimeout(poll, pollIntervalMs);
         }
       } catch (err) {
@@ -194,7 +200,6 @@ export default function App() {
       }
     };
 
-    // first poll
     poll();
 
     return () => {
@@ -203,7 +208,6 @@ export default function App() {
     };
   }, [jobId, pollIntervalMs]);
 
-  // Download JSON report
   const downloadReport = () => {
     if (!report) return;
     const blob = new Blob([JSON.stringify(report, null, 2)], {
@@ -216,88 +220,6 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
   };
-
-  // Capture snapshot of 3D canvas (renderer dom element)
-  const captureSnapshot = async () => {
-    try {
-      // find the canvas element produced by react-three-fiber
-      const canvas = document.querySelector("canvas");
-      if (!canvas) return alert("3D canvas not found.");
-      const data = canvas.toDataURL("image/png");
-      const a = document.createElement("a");
-      a.href = data;
-      a.download = `snapshot-${Date.now()}.png`;
-      a.click();
-    } catch (err) {
-      console.error(err);
-      alert("Snapshot failed: " + err.message);
-    }
-  };
-
-  // debugUpload.js - paste inside your React component
-  function debugUploadFile(file) {
-    return new Promise((resolve, reject) => {
-      if (!file) {
-        reject(new Error("No file provided"));
-        return;
-      }
-      const xhr = new XMLHttpRequest();
-      const endpoint =
-        (process.env.REACT_APP_API_BASE || "http://localhost:8000") +
-        "/analyze-model-async";
-      // console.log("Uploading to:", endpoint);
-
-      xhr.open("POST", endpoint, true);
-      xhr.responseType = "json";
-
-      xhr.upload.onprogress = (ev) => {
-        if (ev.lengthComputable) {
-          const pct = Math.round((ev.loaded / ev.total) * 100);
-          // console.log("upload progress:", pct + "%");
-          // update state if you want
-        }
-      };
-
-      xhr.onload = () => {
-        // console.log(
-          // "XHR status:",
-          // xhr.status,
-          // xhr.statusText,
-          // "response:",
-          // xhr.response
-        // );
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(xhr.response);
-        } else {
-          // try to parse response text for server error
-          let text = xhr.response;
-          if (!text) {
-            try {
-              text = xhr.responseText;
-            } catch (e) {
-              text = null;
-            }
-          }
-          reject(
-            new Error(
-              `Upload failed: ${xhr.status} ${
-                xhr.statusText
-              } - ${JSON.stringify(text)}`
-            )
-          );
-        }
-      };
-
-      xhr.onerror = (e) => {
-        console.error("XHR onerror", e);
-        reject(new Error("Network error during upload"));
-      };
-
-      const form = new FormData();
-      form.append("file", file, file.name);
-      xhr.send(form);
-    });
-  }
 
   return (
     <div className="app">
@@ -343,13 +265,6 @@ export default function App() {
             >
               Export JSON
             </button>
-            <button
-              className="btn outline"
-              onClick={captureSnapshot}
-              disabled={!report}
-            >
-              Capture Snapshot
-            </button>
           </div>
         </div>
       </header>
@@ -368,23 +283,9 @@ export default function App() {
           </div>
 
           <div className="viewer">
-            {/* <IfcBrowserViewer
-              fileUrl={uploadedFileUrl}
-              // onModelLoaded={() => console.log("IFC loaded in viewer")}
-            /> */}
             <IfcBrowserViewer
               key={uploadedFileUrl || "no-ifc"}
               fileUrl={uploadedFileUrl}
-              // onModelLoaded={() => {
-              //   console.log(
-              //     "IFC loaded in viewer — App sees it:",
-              //     uploadedFileUrl
-              //   );
-              //   // trigger one render pass on the viewer if available
-              //   try {
-              //     window.ifcViewer?.context?.render?.();
-              //   } catch (e) {}
-              // }}
             />
           </div>
 
@@ -436,6 +337,74 @@ export default function App() {
                 <DetailsPanel instrument={selected} />
               </motion.div>
             </AnimatePresence>
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <button
+              className="btn outline"
+              onClick={requestAiSummary}
+              disabled={!report || aiLoading}
+            >
+              {aiLoading ? "Analyzing…" : "AI Summary"}
+            </button>
+
+            {aiSummary && (
+              <div
+                className="ai-summary card"
+                style={{ marginTop: 10, padding: 10 }}
+              >
+                {aiSummary.error ? (
+                  <pre>{aiSummary.error}</pre>
+                ) : (
+                  <>
+                    <div>
+                      <strong>Total instruments:</strong>{" "}
+                      {aiSummary.total_instruments}
+                    </div>
+                    <div>
+                      <strong>By type:</strong>
+                      <ul>
+                        {(aiSummary.by_type || []).map((t, i) => (
+                          <li key={i}>
+                            {t.type}: {t.count}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div>
+                      <strong>Failures:</strong>
+                      {(aiSummary.failures || []).length === 0 ? (
+                        <div>None detected</div>
+                      ) : (
+                        <ul>
+                          {(aiSummary.failures || []).map((f, idx) => (
+                            <li key={idx}>
+                              <strong>{f.tag}</strong> ({f.type}) — issues:{" "}
+                              {f.issues.join(", ")}
+                              <div style={{ fontSize: 12, color: "#666" }}>
+                                {JSON.stringify(f.details)}
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+
+                    <div>
+                      <strong>Recommendations:</strong>
+                      <ol>
+                        {(aiSummary.summary_recommendations || []).map(
+                          (r, i) => (
+                            <li key={i}>{r}</li>
+                          )
+                        )}
+                      </ol>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
 
           {error && <div className="error">{error}</div>}

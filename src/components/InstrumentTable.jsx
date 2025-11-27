@@ -1,11 +1,4 @@
-// src/components/InstrumentTable.jsx
 import React, { useState, useMemo } from "react";
-
-/**
- * InstrumentTable: safe table rendering that ensures tbody only contains <tr>.
- * - instruments: array of instrument objects
- * - onSelect: callback when a row is clicked
- */
 
 export default function InstrumentTable({
   instruments = [],
@@ -15,7 +8,6 @@ export default function InstrumentTable({
   const [sortKey, setSortKey] = useState("tag");
   const [sortDir, setSortDir] = useState("asc");
 
-  // defensive: ensure instruments is an array
   const items = Array.isArray(instruments) ? instruments : [];
 
   const filtered = useMemo(() => {
@@ -33,7 +25,6 @@ export default function InstrumentTable({
     arr.sort((a, b) => {
       let va = a?.[sortKey] ?? a?.[sortKey?.toLowerCase?.()] ?? "";
       let vb = b?.[sortKey] ?? b?.[sortKey?.toLowerCase?.()] ?? "";
-      // if objects, stringify minimally
       if (typeof va === "object") va = JSON.stringify(va);
       if (typeof vb === "object") vb = JSON.stringify(vb);
       va = (va ?? "").toString();
@@ -111,7 +102,6 @@ export default function InstrumentTable({
 
         <tbody>
           {filtered.length === 0 ? (
-            // When no rows, render a single TR with a message (no raw text nodes)
             <tr>
               <td colSpan={5} style={{ padding: 12, color: "#6b7280" }}>
                 No instruments found.
@@ -119,7 +109,6 @@ export default function InstrumentTable({
             </tr>
           ) : (
             filtered.map((ins, idx) => {
-              // create a stable unique id for key:
               const stableId =
                 (ins &&
                   (ins.GlobalId || (ins.raw && ins.raw.GlobalId) || ins.tag)) ||

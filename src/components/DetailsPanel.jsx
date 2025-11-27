@@ -1,9 +1,5 @@
 import React from "react";
 
-/**
- * Shows the selected instrument details
- */
-
 export default function DetailsPanel({ instrument }) {
   if (!instrument) {
     return (
